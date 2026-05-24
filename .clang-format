@@ -1,0 +1,28 @@
+BasedOnStyle: LLVM
+
+# インデントはタブ使用
+UseTab: Always
+IndentWidth: 4
+TabWidth: 4
+
+# 1行の長さ制限
+ColumnLimit: 120
+
+# カッコの強制
+InsertBraces: true
+AllowShortBlocksOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+
+# カッコ位置指定
+BreakBeforeBraces: Linux
+
+# インデント設定
+AccessModifierOffset: -4
+IndentCaseLabels: false
+FixNamespaceComments: true
+NamespaceIndentation: None
+
+# スペース設定 
+SpaceBeforeParens: ControlStatements
