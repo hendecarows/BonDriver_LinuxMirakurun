@@ -8,6 +8,7 @@
 #include "strutil.hpp"
 
 #include <dlfcn.h>
+#include <memory>
 #include <stdint.h>
 #include <unistd.h>
 
@@ -32,8 +33,6 @@ namespace BonDriver_LinuxMirakurun
 BonDriver::BonDriver(config::Config &config)
 {
 	try {
-		session_ = std::make_shared<cpr::Session>();
-
 		// INIファイルの読み込み
 		// [BonDriver_LinuxMirakurun]
 		auto sct = config.Get("BonDriver_LinuxMirakurun");
@@ -48,7 +47,7 @@ BonDriver::BonDriver(config::Config &config)
 		auto name = sct.GetStr("Name", "LinuxMirakurun");
 		name_ = char_conv_.Convert<std::u16string>(name);
 		server_address_ = sct.Get("ServerAddress");
-		auto http_verbose_log = sct.GetBool("HttpVerboseLog", false);
+		http_verbose_log_ = sct.GetBool("HttpVerboseLog", false);
 		auto channel_list_timeout = sct.GetIntMinMax("ChannelListTimeout", 500, 0, 5000);
 		session_timeout_ = sct.GetIntMinMax("SessionTimeout", 1000, 0, 5000);
 		response_timeout_ = sct.GetIntMinMax("ResponseTimeout", 2000, 0, 5000);
@@ -63,7 +62,7 @@ BonDriver::BonDriver(config::Config &config)
 		PLOGD << "LogLevel = " << loglevel;
 		PLOGD << "Name = " << name;
 		PLOGD << "ServerAddress = " << server_address_;
-		PLOGD << "HttpVerboseLog = " << http_verbose_log;
+		PLOGD << "HttpVerboseLog = " << http_verbose_log_;
 		PLOGD << "ChannelListTimeout = " << channel_list_timeout;
 		PLOGD << "SessionTimout = " << session_timeout_;
 		PLOGD << "ResponseTimeout = " << response_timeout_;
@@ -72,23 +71,7 @@ BonDriver::BonDriver(config::Config &config)
 		PLOGD << "MaximumNumberOfChannels = " << max_channels;
 
 		// 接続プロトコルを ServerAddress の文字列から判定する
-		connection_protocol_ = DetermineProtocol(server_address_);
-		if (connection_protocol_ == Protocol::UNKNOWN) {
-			throw RuntimeError(std::format("invalid protocol : {}", server_address_));
-		}
-
-		// Unix domain Socket の場合
-		// server_address_ から先頭の unix:// ７文字を削除
-		// server_address_ を cpr ライブラリで必要なダミーの http://localhost に変更
-		if (connection_protocol_ == Protocol::UNIX_DOMAIN_SOCKET) {
-			PLOGD << "use unix domain socket: " << server_address_;
-			socket_path_ = server_address_.substr(7);
-			server_address_ = "http://localhost";
-			session_->SetUnixSocket(cpr::UnixSocket{socket_path_});
-		}
-
-		// libcpr のログ設定
-		session_->SetVerbose(cpr::Verbose{http_verbose_log});
+		DetermineProtocol(server_address_);
 
 		// iniファイルで定義されたチャンネル設定を読み込む
 		auto spaces = strutil::Split(config.Get("Space").Get("Space"));
@@ -115,31 +98,28 @@ BonDriver::BonDriver(config::Config &config)
 
 			// チャンネルリストを取得
 			// GET /api/channels?type=GR
+			auto session = MakeSession(channel_list_timeout);
 			auto url = cpr::Url(std::format("{}/api/channels", server_address_));
 			auto params = cpr::Parameters({{"type", type}});
-			session_->SetUrl(url);
-			session_->SetParameters(params);
-			session_->SetTimeout(cpr::Timeout{channel_list_timeout});
-			auto r = session_->Get();
-			PLOGD << "GET " << r.url;
+			session->SetUrl(url);
+			session->SetParameters(params);
+			auto response = session->Get();
+			PLOGD << "GET " << response.url;
 
-			if (r.error) {
-				throw RuntimeError(std::format("GET {} : {}", r.url.str(), r.error.message));
-			} else if (r.status_code != 200) {
-				PLOGW << "GET " << r.url << " status code = " << r.status_code;
+			if (response.error) {
+				throw RuntimeError(std::format("GET {} : {}", response.url.str(), response.error.message));
+			} else if (response.status_code != 200) {
+				PLOGW << "GET " << response.url << " status code = " << response.status_code;
 				continue;
 			}
 
 			try {
-				auto json = nlohmann::json::parse(r.text);
+				auto json = nlohmann::json::parse(response.text);
 				sp.AddAutoChannelList(char_conv_, json, type);
 			} catch (const std::exception &e) {
 				PLOGW << "failed to add auto channel list : " << e.what();
 			}
 		}
-
-		// 通常の接続タイムアウトに戻す
-		session_->SetTimeout(cpr::Timeout{session_timeout_});
 	} catch (const std::exception &e) {
 		PLOGE << e.what();
 		throw;
@@ -163,22 +143,23 @@ bool BonDriver::OpenTuner(void)
 
 	try {
 		// /api/version で接続可否を確認
+		auto session = MakeSession(session_timeout_);
 		auto url = cpr::Url{std::format("{}/api/version", server_address_)};
 		auto params = cpr::Parameters{};
 		auto timeout = cpr::Timeout{session_timeout_};
-		session_->SetUrl(url);
-		session_->SetParameters(params);
-		session_->SetTimeout(timeout);
-		auto r = session_->Get();
-		PLOGD << "GET " << r.url;
+		session->SetUrl(url);
+		session->SetParameters(params);
+		session->SetTimeout(timeout);
+		auto response = session->Get();
+		PLOGD << "GET " << response.url;
 
-		if (r.error) {
-			throw RuntimeError(std::format("GET {} : {}", r.url.str(), r.error.message));
-		} else if (r.status_code != 200) {
-			throw RuntimeError(std::format("GET {} : status code = {}", r.url.str(), r.status_code));
+		if (response.error) {
+			throw RuntimeError(std::format("GET {} : {}", response.url.str(), response.error.message));
+		} else if (response.status_code != 200) {
+			throw RuntimeError(std::format("GET {} : status code = {}", response.url.str(), response.status_code));
 		}
 
-		version_ = nlohmann::json::parse(r.text);
+		version_ = nlohmann::json::parse(response.text);
 		is_open_tuner_ = true;
 	} catch (const std::exception &e) {
 		PLOGE << e.what();
@@ -196,9 +177,9 @@ void BonDriver::CloseTuner(void)
 	}
 
 	// TS転送を停止
-	is_streaming_ = false;
-	if (response_.valid()) {
-		response_.wait_for(std::chrono::milliseconds(response_timeout_));
+	if (is_streaming_ && streaming_response_.valid()) {
+		is_streaming_ = false;
+		streaming_response_.wait_for(std::chrono::milliseconds(response_timeout_));
 		PLOGD << "stop streaming";
 	}
 
@@ -331,25 +312,27 @@ bool BonDriver::SetChannel(const uint32_t dwSpace, const uint32_t dwChannel)
 		auto callback = cpr::WriteCallback(
 			[this](std::string_view data, intptr_t userdata) { return StreamHandler(data, userdata); });
 
-		// HEAD で URL チェック
-		session_->SetUrl(url);
-		session_->SetParameters(params);
-		session_->SetWriteCallback(cpr::WriteCallback{});
-		session_->SetTimeout(cpr::Timeout{session_timeout_});
-		auto r = session_->Head();
-		PLOGD << "HEAD " << r.url;
-
-		if (r.error) {
-			throw RuntimeError(std::format("HEAD {} : {}", r.url.str(), r.error.message));
-		} else if (r.status_code != 200) {
-			throw RuntimeError(std::format("HEAD {} : status code = {}", r.url.str(), r.status_code));
+		// TSスレッド停止
+		if (is_streaming_ && streaming_response_.valid()) {
+			is_streaming_ = false;
+			streaming_response_.wait_for(std::chrono::milliseconds(response_timeout_));
+			streaming_session_.reset();
+			PLOGD << "stop streaming";
 		}
 
-		// TSスレッド停止
-		if (response_.valid()) {
-			is_streaming_ = false;
-			response_.wait_for(std::chrono::milliseconds(response_timeout_));
-			PLOGD << "stop streaming";
+		// HEAD で URL チェック
+		streaming_session_ = MakeSession(session_timeout_);
+		streaming_session_->SetUrl(url);
+		streaming_session_->SetParameters(params);
+		streaming_session_->SetWriteCallback(cpr::WriteCallback{});
+		streaming_session_->SetTimeout(cpr::Timeout{session_timeout_});
+		auto response = streaming_session_->Head();
+		PLOGD << "HEAD " << response.url;
+
+		if (response.error) {
+			throw RuntimeError(std::format("HEAD {} : {}", response.url.str(), response.error.message));
+		} else if (response.status_code != 200) {
+			throw RuntimeError(std::format("HEAD {} : status code = {}", response.url.str(), response.status_code));
 		}
 
 		// TSスレッド開始
@@ -357,11 +340,11 @@ bool BonDriver::SetChannel(const uint32_t dwSpace, const uint32_t dwChannel)
 		PLOGD << "GET " << url.str() << '?' << params.GetContent();
 		stream_buffer_->Clear();
 		is_streaming_ = true;
-		session_->SetUrl(url);
-		session_->SetParameters(params);
-		session_->SetWriteCallback(callback);
-		session_->SetTimeout(cpr::Timeout{STREAM_TIMEOUT});
-		response_ = session_->GetAsync();
+		streaming_session_->SetUrl(url);
+		streaming_session_->SetParameters(params);
+		streaming_session_->SetWriteCallback(callback);
+		streaming_session_->SetTimeout(cpr::Timeout{STREAM_TIMEOUT});
+		streaming_response_ = streaming_session_->GetAsync();
 
 		// ビットレート用変数を初期化
 		bitrate_size_ = 0;
@@ -447,18 +430,45 @@ void BonDriver::Space::AddAutoChannelList(strutil::CharConv &cv, nlohmann::json 
 	}
 }
 
-BonDriver::Protocol BonDriver::DetermineProtocol(const std::string &address)
+void BonDriver::DetermineProtocol(std::string_view address)
 {
+	auto protocol = Protocol::UNKNOWN;
+
 	// Prefix で判断
 	if (address.starts_with("http://") || address.starts_with("https://")) {
-		return Protocol::HTTP;
+		protocol = Protocol::HTTP;
+	} else if (address.starts_with("unix://")) {
+		// Unix domain Socket の場合
+		// 先頭の unix:// ７文字を削除したものがUnixソケットのパス
+		// cpr ライブラリで必要なダミーの http://localhost に変更
+
+		protocol = Protocol::UNIX_DOMAIN_SOCKET;
+		PLOGD << "use unix domain socket: " << address;
+		socket_path_ = server_address_.substr(7);
+		server_address_ = "http://localhost";
+	} else {
+		throw RuntimeError(std::format("invalid protocol : {}", address));
 	}
 
-	if (address.starts_with("unix://")) {
-		return Protocol::UNIX_DOMAIN_SOCKET;
+	connection_protocol_ = protocol;
+}
+
+std::unique_ptr<cpr::Session> BonDriver::MakeSession(int32_t timeout)
+{
+	auto session = std::make_unique<cpr::Session>();
+
+	// Unix domain Socket の場合
+	if (connection_protocol_ == Protocol::UNIX_DOMAIN_SOCKET) {
+		session->SetUnixSocket(cpr::UnixSocket{socket_path_});
 	}
 
-	return Protocol::UNKNOWN;
+	// ログ設定
+	session->SetVerbose(cpr::Verbose{http_verbose_log_});
+
+	// timeout
+	session->SetTimeout(cpr::Timeout{timeout});
+
+	return session;
 }
 
 bool BonDriver::StreamHandler(std::string_view data, intptr_t)

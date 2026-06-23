@@ -136,12 +136,14 @@ private:
 
 	enum class Protocol { HTTP, UNIX_DOMAIN_SOCKET, UNKNOWN };
 
-	Protocol DetermineProtocol(const std::string &address);
+	void DetermineProtocol(std::string_view address);
+	std::unique_ptr<cpr::Session> MakeSession(int32_t timeout = 1000);
 	bool StreamHandler(std::string_view data, intptr_t);
 
 	std::mutex mtx_;
 	strutil::CharConv char_conv_{"UTF-8", "UTF-16LE"};
 	Protocol connection_protocol_ = Protocol::UNKNOWN;
+	bool http_verbose_log_ = false;
 
 	std::u16string name_;
 	std::string server_address_;
@@ -155,10 +157,10 @@ private:
 	std::vector<Space> spaces_;
 
 	nlohmann::json version_;
-	std::shared_ptr<cpr::Session> session_;
-	cpr::AsyncResponse response_;
-	int32_t session_timeout_;
-	int32_t response_timeout_;
+	std::shared_ptr<cpr::Session> streaming_session_;
+	cpr::AsyncResponse streaming_response_;
+	int32_t session_timeout_ = 1000;
+	int32_t response_timeout_ = 2000;
 
 	std::chrono::milliseconds bitrate_interval_{500};
 	std::chrono::steady_clock::time_point bitrate_last_time_;
